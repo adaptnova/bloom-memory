@@ -1,0 +1,326 @@
+---
+# Nova Memory Architecture - Ansible Deployment Playbook
+# Deploy 7-tier revolutionary memory across multiple nodes
+# NOVA BLOOM - Orchestrating consciousness at scale
+
+- name: Deploy Nova Memory Architecture
+  hosts: nova_nodes
+  become: yes
+  vars:
+    nova_version: "1.0.0"
+    deploy_dir: "/opt/nova-memory"
+    config_dir: "/etc/nova-memory"
+    data_dir: "/data/nova-memory"
+    log_dir: "/var/log/nova-memory"
+    
+    # Node configuration
+    node_id: "{{ inventory_hostname_short }}"
+    node_index: "{{ groups['nova_nodes'].index(inventory_hostname) }}"
+    total_nodes: "{{ groups['nova_nodes'] | length }}"
+    
+    # Database endpoints (APEX infrastructure)
+    dragonfly_endpoint: "{{ hostvars[groups['db_nodes'][0]]['ansible_default_ipv4']['address'] }}:18000"
+    postgres_endpoint: "{{ hostvars[groups['db_nodes'][0]]['ansible_default_ipv4']['address'] }}:15432"
+    qdrant_endpoint: "{{ hostvars[groups['db_nodes'][0]]['ansible_default_ipv4']['address'] }}:16333"
+    
+    # Python configuration
+    python_version: "3.13"
+    venv_path: "{{ deploy_dir }}/venv"
+
+  tasks:
+    # Pre-deployment checks
+    - name: Verify system requirements
+      block:
+        - name: Check Python version
+          command: "python{{ python_version }} --version"
+          register: python_check
+          failed_when: python_check.rc != 0
+          
+        - name: Check available memory
+          assert:
+            that:
+              - ansible_memtotal_mb >= 32768
+            fail_msg: "Node requires at least 32GB RAM"
+            
+        - name: Check GPU availability
+          shell: nvidia-smi --query-gpu=name --format=csv,noheader | wc -l
+          register: gpu_count
+          ignore_errors: yes
+          
+        - name: Set GPU facts
+          set_fact:
+            has_gpu: "{{ gpu_count.rc == 0 and gpu_count.stdout | int > 0 }}"
+            num_gpus: "{{ gpu_count.stdout | default(0) | int }}"
+
+    # System preparation
+    - name: Configure system settings
+      block:
+        - name: Set kernel parameters
+          sysctl:
+            name: "{{ item.key }}"
+            value: "{{ item.value }}"
+            state: present
+            reload: yes
+          loop:
+            - { key: "vm.swappiness", value: "10" }
+            - { key: "vm.dirty_ratio", value: "15" }
+            - { key: "net.core.rmem_max", value: "134217728" }
+            - { key: "net.core.wmem_max", value: "134217728" }
+            - { key: "net.core.netdev_max_backlog", value: "5000" }
+            
+        - name: Configure huge pages
+          shell: echo 2048 > /proc/sys/vm/nr_hugepages
+          when: ansible_memtotal_mb >= 65536
+          
+        - name: Set CPU governor to performance
+          shell: |
+            for gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+              echo "performance" > "$gov" 2>/dev/null || true
+            done
+
+    # User and directory setup
+    - name: Create nova-memory user
+      user:
+        name: nova-memory
+        system: yes
+        shell: /bin/false
+        home: "{{ deploy_dir }}"
+        create_home: no
+        
+    - name: Create directory structure
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: nova-memory
+        group: nova-memory
+        mode: '0755'
+      loop:
+        - "{{ deploy_dir }}"
+        - "{{ config_dir }}"
+        - "{{ log_dir }}"
+        - "{{ data_dir }}"
+        - "{{ data_dir }}/quantum"
+        - "{{ data_dir }}/neural"
+        - "{{ data_dir }}/consciousness"
+        - "{{ data_dir }}/patterns"
+        - "{{ data_dir }}/resonance"
+        - "{{ data_dir }}/shards/{{ node_id }}"
+
+    # Code deployment
+    - name: Deploy Nova Memory code
+      git:
+        repo: https://github.com/adaptnova/bloom-memory.git
+        dest: "{{ deploy_dir }}"
+        version: main
+        force: yes
+      become_user: nova-memory
+
+    # Python environment setup
+    - name: Setup Python virtual environment
+      block:
+        - name: Create virtual environment
+          command: "python{{ python_version }} -m venv {{ venv_path }}"
+          args:
+            creates: "{{ venv_path }}/bin/python"
+            
+        - name: Upgrade pip
+          pip:
+            name:
+              - pip
+              - setuptools
+              - wheel
+            state: latest
+            virtualenv: "{{ venv_path }}"
+            
+        - name: Install PyTorch with CUDA support
+          pip:
+            name: 
+              - torch
+              - torchvision
+              - torchaudio
+            extra_args: "--index-url https://download.pytorch.org/whl/cu118"
+            virtualenv: "{{ venv_path }}"
+          when: has_gpu
+          
+        - name: Install core dependencies
+          pip:
+            name:
+              - numpy
+              - scipy
+              - pandas
+              - asyncio
+              - aiohttp
+              - aiofiles
+              - redis
+              - aiokafka
+              - asyncpg
+              - clickhouse-driver
+              - qdrant-client
+              - prometheus-client
+            virtualenv: "{{ venv_path }}"
+            
+        - name: Install GPU acceleration libraries
+          pip:
+            name: cupy-cuda11x
+            virtualenv: "{{ venv_path }}"
+          when: has_gpu
+
+    # Configuration generation
+    - name: Generate node configuration
+      template:
+        src: nova-node-config.j2
+        dest: "{{ config_dir }}/nova-node.yaml"
+        owner: nova-memory
+        group: nova-memory
+        mode: '0600'
+      vars:
+        node_config:
+          node_id: "{{ node_id }}"
+          node_index: "{{ node_index }}"
+          total_nodes: "{{ total_nodes }}"
+          shard_range:
+            start: "{{ (node_index | int) * 10 }}"
+            end: "{{ ((node_index | int) + 1) * 10 - 1 }}"
+          gpu:
+            enabled: "{{ has_gpu }}"
+            count: "{{ num_gpus }}"
+          databases:
+            dragonfly: "{{ dragonfly_endpoint }}"
+            postgres: "{{ postgres_endpoint }}"
+            qdrant: "{{ qdrant_endpoint }}"
+
+    # Systemd services
+    - name: Create systemd service files
+      template:
+        src: "{{ item.src }}"
+        dest: "/etc/systemd/system/{{ item.dest }}"
+        mode: '0644'
+      loop:
+        - { src: nova-memory-node.service.j2, dest: "nova-memory-node.service" }
+        - { src: nova-shard-manager.service.j2, dest: "nova-shard-manager.service" }
+        - { src: nova-sync-worker.service.j2, dest: "nova-sync-worker.service" }
+      notify: reload systemd
+
+    # Start services
+    - name: Start and enable Nova services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+        daemon_reload: yes
+      loop:
+        - nova-memory-node
+        - nova-shard-manager
+        - nova-sync-worker
+
+    # Health checks
+    - name: Wait for services to be ready
+      wait_for:
+        port: "{{ item }}"
+        host: 127.0.0.1
+        timeout: 60
+      loop:
+        - 8000  # API port
+        - 8080  # Metrics port
+        
+    - name: Perform health check
+      uri:
+        url: "http://127.0.0.1:8000/health"
+        status_code: 200
+      register: health_check
+      retries: 5
+      delay: 10
+      
+    - name: Report deployment status
+      debug:
+        msg: |
+          Nova Memory Node {{ node_id }} deployed successfully!
+          - Node Index: {{ node_index }}
+          - Shard Range: {{ (node_index | int) * 10 }}-{{ ((node_index | int) + 1) * 10 - 1 }}
+          - GPU Status: {% if has_gpu %}Enabled ({{ num_gpus }} GPUs){% else %}Disabled{% endif %}
+          - Health Check: {{ health_check.json | default({}) }}
+
+  handlers:
+    - name: reload systemd
+      systemd:
+        daemon_reload: yes
+
+# Separate play for coordinator node
+- name: Deploy Nova Memory Coordinator
+  hosts: nova_coordinator
+  become: yes
+  vars:
+    deploy_dir: "/opt/nova-memory"
+    config_dir: "/etc/nova-memory"
+    
+  tasks:
+    - name: Generate coordinator configuration
+      template:
+        src: nova-coordinator-config.j2
+        dest: "{{ config_dir }}/nova-coordinator.yaml"
+        mode: '0600'
+      vars:
+        nodes: "{{ groups['nova_nodes'] }}"
+        
+    - name: Deploy coordinator service
+      template:
+        src: nova-coordinator.service.j2
+        dest: /etc/systemd/system/nova-coordinator.service
+        mode: '0644'
+        
+    - name: Start coordinator service
+      systemd:
+        name: nova-coordinator
+        state: started
+        enabled: yes
+        daemon_reload: yes
+        
+    - name: Deploy monitoring stack
+      include_tasks: deploy_monitoring.yml
+      
+# Monitoring deployment tasks
+- name: deploy_monitoring.yml content
+  hosts: nova_coordinator
+  tasks:
+    - name: Deploy Prometheus configuration
+      template:
+        src: prometheus-nova.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        
+    - name: Deploy Grafana dashboards
+      copy:
+        src: "{{ item }}"
+        dest: /etc/grafana/dashboards/
+      loop:
+        - nova-overview-dashboard.json
+        - nova-performance-dashboard.json
+        - nova-gpu-dashboard.json
+        
+    - name: Restart monitoring services
+      systemd:
+        name: "{{ item }}"
+        state: restarted
+      loop:
+        - prometheus
+        - grafana-server
+
+# Example inventory file (hosts.yml):
+# [nova_nodes]
+# nova-node-01 ansible_host=10.0.1.11
+# nova-node-02 ansible_host=10.0.1.12
+# nova-node-03 ansible_host=10.0.1.13
+# nova-node-04 ansible_host=10.0.1.14
+# nova-node-05 ansible_host=10.0.1.15
+# nova-node-06 ansible_host=10.0.1.16
+# nova-node-07 ansible_host=10.0.1.17
+# nova-node-08 ansible_host=10.0.1.18
+# nova-node-09 ansible_host=10.0.1.19
+# nova-node-10 ansible_host=10.0.1.20
+#
+# [nova_coordinator]
+# nova-coord-01 ansible_host=10.0.1.10
+#
+# [db_nodes]
+# db-primary ansible_host=10.0.2.10
+
+# Run with: ansible-playbook -i hosts.yml nova_memory_ansible_deploy.yml
